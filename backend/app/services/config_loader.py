@@ -2,15 +2,24 @@
 Config Loader Module
 Reads and parses the master workbook into structured JSON objects.
 Excel is READ-ONLY - we only parse values, never execute formulas.
-Uses table names and sheet names, not fixed cell positions.
+Uses ONLY named Excel tables - NO fallback to sheet scanning.
 """
 
 import openpyxl
 from typing import Dict, List, Any, Optional
 from pathlib import Path
 import logging
+from app.core.exceptions import ConfigError
 
 logger = logging.getLogger(__name__)
+
+# Required tables that MUST exist in master workbook
+REQUIRED_TABLES = [
+    "tbl_SCHEMA",
+    "tbl_Pricing_Flow",
+    "tbl_Rules",
+    "tbl_Rate_Library_Map"
+]
 
 
 class ConfigLoader:
@@ -28,7 +37,10 @@ class ConfigLoader:
         }
         
     def load(self) -> Dict[str, Any]:
-        """Load all configuration from workbook using table names"""
+        """
+        Load all configuration from workbook using ONLY named Excel tables.
+        NO fallback to sheet scanning - tables MUST exist or ConfigError is raised.
+        """
         if not self.workbook_path.exists():
             raise FileNotFoundError(f"Master workbook not found: {self.workbook_path}")
         
@@ -36,19 +48,48 @@ class ConfigLoader:
         # data_only=True ensures we read VALUES not formulas (read-only principle)
         self.workbook = openpyxl.load_workbook(self.workbook_path, data_only=True)
         
-        # Load each table by name
-        self.config["schema"] = self._load_table("tbl_SCHEMA", "__SCHEMA__")
-        self.config["pricing_flow"] = self._load_table("tbl_Pricing_Flow", "Pricing_Flow")
-        self.config["rules"] = self._load_table("tbl_Rules", "Rules")
-        self.config["rate_library_map"] = self._load_table("tbl_Rate_Library_Map", "Rate_Library_Map")
+        # Validate ALL required tables exist before loading any
+        self._validate_required_tables()
+        
+        # Load each table by name - NO fallback
+        self.config["schema"] = self._load_table("tbl_SCHEMA")
+        self.config["pricing_flow"] = self._load_table("tbl_Pricing_Flow")
+        self.config["rules"] = self._load_table("tbl_Rules")
+        self.config["rate_library_map"] = self._load_table("tbl_Rate_Library_Map")
         
         logger.info("Master workbook loaded successfully")
         return self.config
     
-    def _load_table(self, table_name: str, sheet_name: str) -> List[Dict[str, Any]]:
+    def _validate_required_tables(self):
+        """
+        Validate that ALL required tables exist in the workbook.
+        Raises ConfigError with complete list of missing tables if any are not found.
+        """
+        # Collect all table names from all worksheets
+        found_tables = set()
+        searched_sheets = []
+        
+        for sheet in self.workbook.worksheets:
+            searched_sheets.append(sheet.title)
+            if hasattr(sheet, 'tables'):
+                found_tables.update(sheet.tables.keys())
+        
+        # Check for missing tables
+        missing_tables = [table for table in REQUIRED_TABLES if table not in found_tables]
+        
+        if missing_tables:
+            raise ConfigError(
+                f"Missing required tables in master workbook '{self.workbook_path.name}': "
+                f"{', '.join(missing_tables)}. "
+                f"Required tables: {', '.join(REQUIRED_TABLES)}. "
+                f"Searched sheets: {', '.join(searched_sheets)}. "
+                f"Found tables: {', '.join(sorted(found_tables)) if found_tables else 'none'}."
+            )
+    
+    def _load_table(self, table_name: str) -> List[Dict[str, Any]]:
         """
         Load data from a named Excel table using worksheet.tables API.
-        NO fixed cell positions, NO header scanning - uses table ref range.
+        NO fallback - table MUST exist (validated in _validate_required_tables).
         """
         # Find the table across all worksheets
         for sheet in self.workbook.worksheets:
@@ -56,11 +97,8 @@ class ConfigLoader:
                 table = sheet.tables[table_name]
                 return self._parse_table_data(sheet, table, table_name)
         
-        # Table not found - this is an error
-        raise ValueError(
-            f"Required table '{table_name}' not found in master workbook. "
-            f"Expected tables: tbl_SCHEMA, tbl_Pricing_Flow, tbl_Rules, tbl_Rate_Library_Map"
-        )
+        # Should never reach here if _validate_required_tables was called
+        raise ConfigError(f"Table '{table_name}' not found (should have been caught in validation)")
     
     def _parse_table_data(self, sheet, table, table_name: str) -> List[Dict[str, Any]]:
         """

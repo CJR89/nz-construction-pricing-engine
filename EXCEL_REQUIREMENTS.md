@@ -8,10 +8,28 @@ This document specifies the exact requirements for the Excel workbooks used by t
 2. **No Formula Execution**: Application reads VALUES, never executes formulas
 3. **Table-Based Loading**: Configuration loaded from named Excel tables, not fixed cell positions
 4. **Data Caching**: Formulas must be cached (saved with calculated values)
+5. **MANDATORY TABLES**: Master workbook MUST contain all required named tables or the application will fail to start
 
 ## Master Workbook
 
 **Filename:** `Construction_Knowledge_Base_FINALIZED_WITH_SCHEMA.xlsm`
+
+### ⚠️ CRITICAL: Required Tables
+
+The application will **FAIL TO START** if any of these tables are missing. All four tables MUST exist as named Excel Tables:
+
+- `tbl_SCHEMA`
+- `tbl_Pricing_Flow`
+- `tbl_Rules`
+- `tbl_Rate_Library_Map`
+
+**Error Handling:** If any required table is missing, the application will raise a `ConfigError` with:
+- List of missing table names
+- Workbook filename
+- Sheets that were searched
+- Tables that were found (if any)
+
+**No Fallback:** The application will NOT attempt to load data from sheets if tables are missing. Tables must be explicitly defined in Excel.
 
 ### Required Tables
 
@@ -134,11 +152,21 @@ Describes how to parse each rate library.
 3. Save the workbook
 4. This caches all formula values
 
-**Verification:** Application logs warnings when encountering None values:
-```
-WARNING: Table 'tbl_SCHEMA' row 5: cell in column 'field_name' is None. 
-This may indicate an uncached formula. Excel must be saved with values cached.
-```
+**STRICT ENFORCEMENT:** The application will **RAISE AN ERROR** (UncachedFormulaError) if it encounters None values in data rows that appear to be from uncached formulas. The error message will include:
+- Workbook filename
+- Sheet name
+- Row number
+- Column(s) with None values
+- Instructions to open in Excel, calculate (F9), save, and re-upload
+
+**What's Allowed:**
+- Empty rows (all cells empty) - skipped automatically
+- Header rows (first few rows in each sheet) - skipped automatically
+- Truly empty data cells (optional fields)
+
+**What Causes Errors:**
+- Data rows with None in required fields (description, rates, etc.)
+- Any row that matches search criteria but has None values indicating uncached formulas
 
 ### Table Names
 
@@ -149,6 +177,8 @@ All tables must be defined as Excel Tables (Insert → Table) with exact names:
 - `tbl_Rate_Library_Map`
 
 **Verification:** In Excel, go to Formulas → Name Manager to see all table names.
+
+**MANDATORY:** These tables are not optional. The application performs validation on startup and will fail immediately with a clear error message if tables are missing.
 
 ### Data Types
 
@@ -185,19 +215,38 @@ This enables full audit trail back to source data.
 
 ## Common Issues
 
-### "Table not found" Error
-- Verify table names are exactly: tbl_SCHEMA, tbl_Pricing_Flow, tbl_Rules, tbl_Rate_Library_Map
-- Check tables are defined as Excel Tables, not just named ranges
+### "Missing required tables" Error
+**Error:** `ConfigError: Missing required tables in master workbook 'xxx.xlsm': tbl_XXX...`
 
-### "None value" Warnings
-- Open workbook in Excel
-- Press F9 to recalculate
-- Save and re-upload
+**Solution:**
+- Open master workbook in Excel
+- Verify table names are exactly: tbl_SCHEMA, tbl_Pricing_Flow, tbl_Rules, tbl_Rate_Library_Map
+- Check tables are defined as Excel Tables (Insert → Table), not just named ranges
+- Use Formulas → Name Manager to verify table names
+- Ensure table names match exactly (case-sensitive)
+
+**Important:** The application will NOT fall back to reading sheets directly. Tables MUST exist.
+
+### "Uncached formula" Error
+**Error:** `UncachedFormulaError: Workbook contains formulas without cached values...`
+
+**Solution:**
+- Open the workbook mentioned in error
+- Go to the sheet mentioned in error  
+- Press F9 to recalculate all formulas
+- Save the workbook
+- Re-upload to application
+
+**Why This Happens:** Excel formulas are not cached when:
+- File saved without calculating
+- Formulas were edited but not recalculated
+- File was programmatically generated
 
 ### "Rate not found" Errors
 - Check building type spelling matches descriptions in workbook
 - Verify city names match exactly (Auckland not auckland)
 - Use Rate Lookup page to explore available rates
+- Ensure rate library workbook has cached formula values
 
 ## Best Practices
 

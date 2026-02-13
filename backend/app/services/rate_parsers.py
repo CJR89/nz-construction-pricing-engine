@@ -2,7 +2,8 @@
 Rate Parsers Module
 Parses rate data from the 4 Excel rate libraries (BCM2, ELEM, CPR, DET).
 Handles special notation like BCM2 hyphen-range and Detailed min/max patterns.
-READ-ONLY: Uses openpyxl with data_only=True, handles None from uncached formulas.
+READ-ONLY: Uses openpyxl with data_only=True.
+STRICT: Raises UncachedFormulaError when data rows contain None values.
 """
 
 import openpyxl
@@ -10,6 +11,7 @@ from typing import List, Dict, Any, Optional
 from pathlib import Path
 import logging
 import re
+from app.core.exceptions import UncachedFormulaError
 
 logger = logging.getLogger(__name__)
 
@@ -36,21 +38,20 @@ class RateParser:
         """Search for rates matching text"""
         raise NotImplementedError("Subclasses must implement search_rates")
     
-    def _validate_cell_value(self, cell_value: Any, row_idx: int, col_name: str = "") -> Any:
+    def _is_header_or_note_row(self, row: tuple, row_idx: int, min_data_row: int = 5) -> bool:
         """
-        Validate cell value and handle None from uncached formulas.
-        Raises clear error if None is encountered (indicating uncached formula).
+        Determine if row is a header, note, or section title (not data).
+        Override in subclasses for library-specific logic.
         """
-        if cell_value is None:
-            # None in data_only mode means formula not cached
-            # We allow None for optional fields, but warn about it
-            logger.debug(f"Row {row_idx}, column '{col_name}': None value (may be uncached formula or truly empty)")
-        return cell_value
-    
-    def _is_data_row(self, row: tuple, row_idx: int) -> bool:
-        """Determine if row contains data (not headers/notes)"""
-        # Override in subclasses based on Rate_Library_Map rules
-        return True
+        # Rows before min_data_row are typically headers
+        if row_idx < min_data_row:
+            return True
+        
+        # Empty rows are not data
+        if not any(row):
+            return True
+        
+        return False
 
 
 class BCM2Parser(RateParser):
@@ -83,21 +84,16 @@ class BCM2Parser(RateParser):
             previous_row_data = None
             
             for row_idx, row in enumerate(sheet.iter_rows(values_only=True), start=1):
-                if not any(row):  # Skip empty rows
+                # Skip truly empty rows
+                if not any(row):
                     continue
                 
-                # Check if this is a header row (skip first few rows)
+                # Skip header rows (first few rows)
                 if row_idx < 5:
                     continue
                 
                 # Get description (usually first column)
                 description = str(row[0]) if row[0] else ""
-                
-                # Validate non-None for critical fields
-                if row[0] is None and row_idx > 5:
-                    # Likely uncached formula in description
-                    logger.warning(f"BCM2 sheet '{sheet_name}' row {row_idx}: description is None (uncached formula?)")
-                    continue
                 
                 # Check if this is a range-high row (starts with -)
                 is_range_high = description.strip().startswith("-")
@@ -121,9 +117,21 @@ class BCM2Parser(RateParser):
                     previous_row_data = None
                     continue
                 
+                # DATA ROW DETECTED (matched search)
+                # Now check for None in critical fields - this indicates uncached formulas
+                if row[0] is None:
+                    # Description is None in a data row - this is an error
+                    raise UncachedFormulaError(
+                        f"Workbook contains formulas without cached values. "
+                        f"Open '{self.source_filename}' in Excel, calculate (F9), save, and re-upload. "
+                        f"Source: {self.source_filename}, Sheet: {sheet_name}, Row: {row_idx}, "
+                        f"Column(s) with None: description"
+                    )
+                
                 # Parse city values (assume columns after description)
                 city_values = {}
                 city_columns = ["Auckland", "Wellington", "Christchurch", "Hamilton", "Tauranga", "Dunedin"]
+                none_columns = []
                 
                 for i, cell in enumerate(row[1:], start=1):
                     if i - 1 < len(city_columns):
@@ -134,8 +142,19 @@ class BCM2Parser(RateParser):
                                 "high": None  # Will be filled if next row is range-high
                             }
                         elif cell is None:
-                            # May be uncached formula - log warning
-                            logger.debug(f"BCM2 row {row_idx}, city {city_name}: None value (uncached formula or empty)")
+                            # Track None columns for potential error
+                            none_columns.append(city_name)
+                
+                # If this is a data row with matching search but has NO rate values at all, raise error
+                # This indicates all rate columns have uncached formulas
+                if none_columns and not city_values and len(none_columns) >= 2:
+                    # Multiple None values in rate columns - likely uncached formulas
+                    raise UncachedFormulaError(
+                        f"Workbook contains formulas without cached values. "
+                        f"Open '{self.source_filename}' in Excel, calculate (F9), save, and re-upload. "
+                        f"Source: {self.source_filename}, Sheet: {sheet_name}, Row: {row_idx}, "
+                        f"Column(s) with None: {', '.join(none_columns)}"
+                    )
                 
                 # Create rate row
                 rate_row = {
@@ -184,22 +203,29 @@ class ELEMParser(RateParser):
                 continue
             
             for row_idx, row in enumerate(sheet.iter_rows(values_only=True), start=1):
+                # Skip empty rows and header rows
                 if not any(row) or row_idx < 3:
                     continue
                 
                 description = str(row[0]) if row[0] else ""
                 
-                # Check for None in description (uncached formula)
-                if row[0] is None and row_idx > 3:
-                    logger.warning(f"ELEM sheet '{sheet_name}' row {row_idx}: description is None (uncached formula?)")
-                    continue
-                
+                # Skip if doesn't match search
                 if search_lower not in description.lower():
                     continue
+                
+                # DATA ROW DETECTED (matched search) - check for None in critical fields
+                if row[0] is None:
+                    raise UncachedFormulaError(
+                        f"Workbook contains formulas without cached values. "
+                        f"Open '{self.source_filename}' in Excel, calculate (F9), save, and re-upload. "
+                        f"Source: {self.source_filename}, Sheet: {sheet_name}, Row: {row_idx}, "
+                        f"Column(s) with None: description"
+                    )
                 
                 # Parse city values
                 city_values = {}
                 city_columns = ["Auckland", "Wellington", "Christchurch"]
+                none_columns = []
                 
                 for i in range(1, min(4, len(row))):
                     if i - 1 < len(city_columns):
@@ -211,7 +237,16 @@ class ELEMParser(RateParser):
                                 "high": None
                             }
                         elif cell is None:
-                            logger.debug(f"ELEM row {row_idx}, city {city_name}: None value")
+                            none_columns.append(city_name)
+                
+                # If all rate columns are None, likely uncached formulas
+                if none_columns and not city_values:
+                    raise UncachedFormulaError(
+                        f"Workbook contains formulas without cached values. "
+                        f"Open '{self.source_filename}' in Excel, calculate (F9), save, and re-upload. "
+                        f"Source: {self.source_filename}, Sheet: {sheet_name}, Row: {row_idx}, "
+                        f"Column(s) with None: {', '.join(none_columns)}"
+                    )
                 
                 rate_row = {
                     "description": description.strip(),
@@ -252,19 +287,26 @@ class CPRParser(RateParser):
                 continue
             
             for row_idx, row in enumerate(sheet.iter_rows(values_only=True), start=1):
+                # Skip empty rows and header rows
                 if not any(row) or row_idx < 3:
                     continue
                 
                 description = str(row[0]) if row[0] else ""
                 
-                # Check for None in description (uncached formula)
-                if row[0] is None and row_idx > 3:
-                    logger.warning(f"CPR sheet '{sheet_name}' row {row_idx}: description is None (uncached formula?)")
-                    continue
-                
+                # Skip if doesn't match search
                 if search_lower not in description.lower():
                     continue
                 
+                # DATA ROW DETECTED (matched search) - check for None in critical fields
+                if row[0] is None:
+                    raise UncachedFormulaError(
+                        f"Workbook contains formulas without cached values. "
+                        f"Open '{self.source_filename}' in Excel, calculate (F9), save, and re-upload. "
+                        f"Source: {self.source_filename}, Sheet: {sheet_name}, Row: {row_idx}, "
+                        f"Column(s) with None: description"
+                    )
+                
+                # Parse rate value
                 city_values = {}
                 if len(row) > 1:
                     cell = row[1]
@@ -274,7 +316,13 @@ class CPRParser(RateParser):
                             "high": None
                         }
                     elif cell is None:
-                        logger.debug(f"CPR row {row_idx}: rate value is None")
+                        # Rate value is None in a data row - this is an error
+                        raise UncachedFormulaError(
+                            f"Workbook contains formulas without cached values. "
+                            f"Open '{self.source_filename}' in Excel, calculate (F9), save, and re-upload. "
+                            f"Source: {self.source_filename}, Sheet: {sheet_name}, Row: {row_idx}, "
+                            f"Column(s) with None: rate_value"
+                        )
                 
                 rate_row = {
                     "description": description.strip(),
@@ -318,18 +366,24 @@ class DETParser(RateParser):
                 continue
             
             for row_idx, row in enumerate(sheet.iter_rows(values_only=True), start=1):
+                # Skip empty rows and header rows
                 if not any(row) or row_idx < 3:
                     continue
                 
                 description = str(row[0]) if row[0] else ""
                 
-                # Check for None in description (uncached formula)
-                if row[0] is None and row_idx > 3:
-                    logger.warning(f"DET sheet '{sheet_name}' row {row_idx}: description is None (uncached formula?)")
-                    continue
-                
+                # Skip if doesn't match search
                 if search_lower not in description.lower():
                     continue
+                
+                # DATA ROW DETECTED (matched search) - check for None in critical fields
+                if row[0] is None:
+                    raise UncachedFormulaError(
+                        f"Workbook contains formulas without cached values. "
+                        f"Open '{self.source_filename}' in Excel, calculate (F9), save, and re-upload. "
+                        f"Source: {self.source_filename}, Sheet: {sheet_name}, Row: {row_idx}, "
+                        f"Column(s) with None: description"
+                    )
                 
                 # Parse rate with possible range notation
                 rate_value = row[1] if len(row) > 1 else None
