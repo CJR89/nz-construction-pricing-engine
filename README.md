@@ -248,18 +248,48 @@ Tables:
 
 ## Troubleshooting
 
+### "Missing required tables" error (ConfigError)
+**Error:** `ConfigError: Missing required tables in master workbook 'xxx.xlsm': tbl_XXX...`
+
+**Cause:** Master workbook does not contain all 4 required Excel tables.
+
+**Solution:**
+- Open master workbook in Excel
+- Verify these tables exist (Insert → Table in Excel):
+  - `tbl_SCHEMA`
+  - `tbl_Pricing_Flow`
+  - `tbl_Rules`
+  - `tbl_Rate_Library_Map`
+- Use Formulas → Name Manager to verify table names
+- Re-upload master workbook
+
+**Note:** The application will NOT fall back to reading sheets directly. All 4 tables are mandatory.
+
+### "Uncached formula" error (UncachedFormulaError)
+**Error:** `UncachedFormulaError: Workbook contains formulas without cached values...`
+
+**Cause:** Excel formulas are not cached (saved with calculated values).
+
+**Solution:**
+- Open the Excel file mentioned in the error
+- Press F9 to recalculate all formulas
+- Save the workbook (Ctrl+S)
+- Re-upload to application
+
+**Why this happens:**
+- File saved without calculating formulas
+- Formulas edited but not recalculated
+- File programmatically generated
+
 ### "Config not loaded" error
 - Ensure master workbook is uploaded via /api/upload
-- Check that workbook contains required tables: tbl_SCHEMA, tbl_Pricing_Flow, tbl_Rules, tbl_Rate_Library_Map
-
-### "None value (uncached formula)" warnings
-- Open Excel file and save with calculated values
-- Ensure formulas are cached before uploading
+- Check that workbook contains all 4 required tables (see above)
 
 ### "Rate not found" errors
 - Verify building type matches descriptions in BCM2
 - Check location city is valid (Auckland, Wellington, etc.)
 - Use Rate Lookup page to explore available rates
+- Ensure rate library workbook has cached formula values
 
 ### CORS errors
 - Check CORS_ORIGINS in .env includes frontend URL
